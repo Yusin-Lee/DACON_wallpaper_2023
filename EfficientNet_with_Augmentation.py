@@ -6,7 +6,7 @@ import os
 import re
 import glob
 import PIL
-
+import timm
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -29,8 +29,8 @@ device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cp
 CFG = {
     'IMG_SIZE':224,
     'EPOCHS':10,
-    'LEARNING_RATE':3e-4,
-    'BATCH_SIZE':32,
+    'LEARNING_RATE':5e-4,
+    'BATCH_SIZE':64,
     'SEED':41
 }
 # %%
@@ -46,11 +46,15 @@ def seed_everything(seed):
 seed_everything(CFG['SEED']) # Seed 고정
 
 # %%
-all_img_list = glob.glob('./도배/train/*/*')
+all_img_list = glob.glob('./train/*/*')
 df = pd.DataFrame(columns=['img_path', 'label'])
 df['img_path'] = all_img_list
 df['img_path'] = df.img_path.str.replace('\\','/')
-df['label'] = df.img_path.apply(lambda x: str(x).split('/')[3])
+df['label'] = df.img_path.apply(lambda x: str(x).split('/')[2])
+df['num'] = df.img_path.apply(lambda x: str(x).split('/')[3][:-4]).astype(int)
+# %%
+df = df[df.num <= 500][['img_path','label']].reset_index(drop = True)
+print(df)
 # %%
 counts = df.groupby('label').count()
 counts
@@ -109,7 +113,7 @@ def train(model, optimizer, train_loader, val_loader, scheduler, device):
     model.to(device)
     criterion = nn.CrossEntropyLoss().to(device)
     
-    best_loss = 9999
+    best_loss = 0
     best_model = None
     
     for epoch in range(1, CFG['EPOCHS']+1):
@@ -134,10 +138,10 @@ def train(model, optimizer, train_loader, val_loader, scheduler, device):
         print(f'Epoch [{epoch}], Train Loss : [{_train_loss:.5f}] Val Loss : [{_val_loss:.5f}] Val Weighted F1 Score : [{_val_score:.5f}]')
        
         if scheduler is not None:
-            scheduler.step(_val_loss)
+            scheduler.step(_val_score)
             
-        if best_loss > _val_loss:
-            best_loss = _val_loss
+        if best_loss < _val_score:
+            best_loss = _val_score
             best_model = model
     
     return best_model
@@ -166,13 +170,38 @@ def validation(model, criterion, val_loader, device):
     
     return _val_loss, _val_score
 # %%
-model = timm.create_model('tf_efficientnet_b0_ns',pretrained = True , num_classes=len(le.classes_))
+model = timm.create_model('tf_efficientnet_b1_ns',pretrained = True , num_classes=len(le.classes_))
 model.eval()
 optimizer = torch.optim.AdamW(params = model.parameters(), lr = CFG["LEARNING_RATE"])
-# scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2, threshold_mode='abs', min_lr=1e-8, verbose=True)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2, threshold_mode='abs', min_lr=1e-8, verbose=True)
 
-infer_model = train(model, optimizer, train_loader, val_loader, None, device) # scheduler
+infer_model = train(model, optimizer, train_loader, val_loader, scheduler, device) # scheduler
 # %%
 
 
+# %%
+test = pd.read_csv('./test.csv')
+test_dataset = CustomDataset(test['img_path'].values, None, test_transform)
+test_loader = DataLoader(test_dataset, batch_size=CFG['BATCH_SIZE'], shuffle=False, num_workers=0)
+
+def inference(model, test_loader, device):
+    model.eval()
+    preds = []
+    with torch.no_grad():
+        for imgs in tqdm(iter(test_loader)):
+            imgs = imgs.float().to(device)
+            
+            pred = model(imgs)
+            
+            preds += pred.argmax(1).detach().cpu().numpy().tolist()
+    
+    preds = le.inverse_transform(preds)
+    return preds
+preds = inference(infer_model, test_loader, device)
+# %%
+submit = pd.read_csv('./sample_submission.csv')
+submit['label'] = preds
+submit
+# %%
+submit.to_csv('./baseline_submit.csv', index=False)
 # %%
